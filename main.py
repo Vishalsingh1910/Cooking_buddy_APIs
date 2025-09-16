@@ -1,38 +1,63 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from openai import OpenAI
-import os, json
-from dotenv import load_dotenv
+# todo: hit this in terminal $env:GEMINI_API_KEY="YOUR_API_KEY_HERE"
 
-# Load .env file
-load_dotenv()
 
-app = FastAPI()
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import google.generativeai as genai
+import os
+import json
 
-# Now it will pick from .env
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+app = Flask(__name__)
+CORS(app)
 
-class IngredientsRequest(BaseModel):
-    ingredients: list[str]
+# Configure Gemini API
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
-@app.post("/get_recipes")
-async def get_recipes(request: IngredientsRequest):
-    prompt = f"""
-    Suggest 3 recipes I can cook using these ingredients: {', '.join(request.ingredients)}.
-    Return valid JSON list with fields: name, ingredients, steps, cooking_time.
-    """
+# Use flash model (faster, higher free quota)
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
-    )
 
-    content = response.choices[0].message.content
-
+@app.route("/generate_recipe", methods=["POST"])
+def generate_recipe():
     try:
-        recipes = json.loads(content)
-    except:
-        recipes = {"error": "Invalid JSON from AI", "raw": content}
-    
-    return {"recipes": recipes}
+        data = request.json
+        ingredients = data.get("ingredients", [])
+
+        if not ingredients:
+            return jsonify({"error": "No ingredients provided"}), 400
+
+        prompt = f"""
+        Generate a recipe in JSON format using these ingredients: {ingredients}.
+        Structure it like this:
+        {{
+          "title": "Recipe Title",
+          "ingredients": ["item1", "item2"],
+          "steps": ["step1", "step2"]
+        }}
+        """
+
+        # Call Gemini
+        gemini_response = model.generate_content(prompt)
+
+        # ✅ Correct way: use .text, not .response.text
+        raw_text = gemini_response.text.strip()
+
+        # Remove Markdown code fences if Gemini adds them
+        if raw_text.startswith("```"):
+            raw_text = raw_text.strip("`")
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:].strip()
+
+        # Try to parse JSON
+        try:
+            recipe_json = json.loads(raw_text)
+        except json.JSONDecodeError:
+            recipe_json = {"raw": raw_text}
+
+        return jsonify(recipe_json)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
